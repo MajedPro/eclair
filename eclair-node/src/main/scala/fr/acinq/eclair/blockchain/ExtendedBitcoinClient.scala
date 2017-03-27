@@ -144,42 +144,44 @@ class ExtendedBitcoinClient(val client: BitcoinJsonRPCClient) {
   def publishTransaction(tx: Transaction)(implicit ec: ExecutionContext): Future[String] =
     publishTransaction(tx2Hex(tx))
 
-  def makeFundingTx(localFundingPubkey: PublicKey, remoteFundingPubkey: PublicKey, amount: Satoshi)(implicit ec: ExecutionContext): Future[(Transaction, Int)] = {
-    val (partialTx, pubkeyScript) = Transactions.makePartialFundingTx(amount, localFundingPubkey, remoteFundingPubkey)
-    for {
-      FundTransactionResponse(unsignedTx, changepos, fee) <- fundTransaction(partialTx)
-      SignTransactionResponse(fundingTx, true) <- signTransaction(unsignedTx)
-      pos = Transactions.findPubKeyScriptIndex(fundingTx, pubkeyScript)
-    } yield (fundingTx, pos)
-  }
-
   /**
-    * *used in interop tests*
     *
-    * @param fundingPriv
-    * @param ourCommitPub
-    * @param theirCommitPub
-    * @param amount
+    * @param localFundingPubkey local funding public key
+    * @param remoteFundingPubkey remote funding public key
+    * @param amount funding amount
+    * @param fee intermediate tx fee
     * @param ec
-    * @return
+    * @return a (parenttx, tx, pos) tuple where:
+    *         - parenttx is a standard signed tx that sends money to a segwit output that we own
+    *         - tx is a signed funding transaction that sends amount to a multisig 2-of-2 output (local
+    *         public key and remote public key)
+    *         - pos is the position of the funding utxo in this tx
+    *         parenttx and tx are intended to be published at the same time (parenttx first) and should be included
+    *         in the same block
     */
-  def makeFundingTx(fundingPriv: PrivateKey, ourCommitPub: PublicKey, theirCommitPub: PublicKey, amount: Btc)(implicit ec: ExecutionContext): Future[(Transaction, Int)] = {
-    val pub = fundingPriv.publicKey
-    val script = write(pay2sh(pay2wpkh(pub)))
-    val address = Base58Check.encode(Base58.Prefix.ScriptAddressTestnet, script)
+  def makeFundingTx(localFundingPubkey: PublicKey, remoteFundingPubkey: PublicKey, amount: Satoshi, fee: Satoshi)(implicit ec: ExecutionContext): Future[(Transaction, Transaction, Int)] = {
+    // this is the funding tx that we want to publish
+    val (partialTx, pubkeyScript) = Transactions.makePartialFundingTx(amount, localFundingPubkey, remoteFundingPubkey)
+    val fundingFee = 1000 satoshi
+
     for {
-      id <- sendFromAccount("", address, amount.amount.toDouble)
-      tx <- getTransaction(id)
-      pos = Transactions.findPubKeyScriptIndex(tx, script)
-      output = tx.txOut(pos)
-      anchorOutputScript = write(pay2wsh(Scripts.multiSig2of2(ourCommitPub, theirCommitPub)))
-      tx1 = Transaction(version = 2, txIn = TxIn(OutPoint(tx, pos), Nil, 0xffffffffL) :: Nil, txOut = TxOut(amount, anchorOutputScript) :: Nil, lockTime = 0)
-      pubKeyScript = write(OP_DUP :: OP_HASH160 :: OP_PUSHDATA(Crypto.hash160(pub.toBin)) :: OP_EQUALVERIFY :: OP_CHECKSIG :: Nil)
-      sig = Transaction.signInput(tx1, 0, pubKeyScript, SIGHASH_ALL, output.amount, 1, fundingPriv)
-      witness = ScriptWitness(Seq(sig, pub))
-      tx2 = tx1.updateWitness(0, witness)
-      pos1 = Transactions.findPubKeyScriptIndex(tx2, anchorOutputScript)
-    } yield (tx2, pos1)
+      // ask for a new address and the corresponding private key
+      JString(address) <- client.invoke("getnewaddress")
+      JString(wif) <- client.invoke("dumpprivkey", address)
+      priv = PrivateKey.fromBase58(wif, Base58.Prefix.SecretKeyTestnet)
+      pub = priv.publicKey
+      // create a tx that sends money to a WPKH output that matches our private key
+      tx = Transaction(version = 2, txIn = Nil, txOut = TxOut(amount + fundingFee, Script.pay2wpkh(pub)) :: Nil, lockTime = 0L)
+      FundTransactionResponse(tx1, changePos, fee) <- fundTransaction(tx)
+      // this is the first tx that we will publish, a standard tx which send money to our p2wpkh address
+      SignTransactionResponse(tx2, true) <- signTransaction(tx1)
+      pos = Transactions.findPubKeyScriptIndex(tx2, Script.pay2wpkh(pub))
+      // now we update our funding tx to spend from our segwit tx
+      tx3 = partialTx.copy(txIn = TxIn(OutPoint(tx2, pos), sequence = TxIn.SEQUENCE_FINAL, signatureScript = Nil) :: Nil)
+      sig = Transaction.signInput(tx3, 0, Script.pay2pkh(pub), SIGHASH_ALL, tx2.txOut(pos).amount, SigVersion.SIGVERSION_WITNESS_V0, priv)
+      tx4 = tx3.updateWitness(0, ScriptWitness(sig :: pub.toBin :: Nil))
+      _ = Transaction.correctlySpends(tx4, tx2:: Nil, ScriptFlags.STANDARD_SCRIPT_VERIFY_FLAGS)
+    } yield(tx2, tx4, 0)
   }
 
   /**

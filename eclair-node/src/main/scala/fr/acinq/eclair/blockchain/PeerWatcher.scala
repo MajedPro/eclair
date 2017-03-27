@@ -121,6 +121,14 @@ class PeerWatcher(nodeParams: NodeParams, client: ExtendedBitcoinClient)(implici
         context.become(watching(watches, block2tx1))
       } else publish(tx)
 
+    case PublishParentAndChild(parent, child) =>
+      client.publishTransaction(parent).flatMap(parentid => {
+        log.debug(s"parent tx published as $parentid")
+        client.publishTransaction(child)
+      }).onFailure {
+        case t: Throwable => log.error(s"cannot publish parent tx ${parent.txid} and child tx ${child.txid}: reason=${t.getMessage}")
+      }
+
     case WatchEventConfirmed(BITCOIN_PARENT_TX_CONFIRMED(tx), blockHeight, _) =>
       val blockCount = Globals.blockCount.get()
       val csvTimeout = Scripts.csvTimeout(tx)
@@ -131,7 +139,9 @@ class PeerWatcher(nodeParams: NodeParams, client: ExtendedBitcoinClient)(implici
       context.become(watching(watches, block2tx1))
 
     case MakeFundingTx(ourCommitPub, theirCommitPub, amount) =>
-      client.makeFundingTx(ourCommitPub, theirCommitPub, amount).map(r => MakeFundingTxResponse(r._1, r._2)).pipeTo(sender)
+      client.makeFundingTx(ourCommitPub, theirCommitPub, amount, 100000000 satoshi).map({
+        case (parenttx, tx, pos) => MakeFundingTxResponse(parenttx, tx, pos)
+      }).pipeTo(sender)
 
     case GetTx(blockHeight, txIndex, outputIndex, ctx) =>
       (for {

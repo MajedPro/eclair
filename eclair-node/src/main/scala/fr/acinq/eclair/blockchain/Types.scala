@@ -27,12 +27,13 @@ final case class WatchEventConfirmed(event: BitcoinEvent, blockHeight: Int, txIn
 final case class WatchEventSpent(event: BitcoinEvent, tx: Transaction) extends WatchEvent
 final case class WatchEventLost(event: BitcoinEvent) extends WatchEvent
 
+final case class PublishParentAndChild(parent: Transaction, child: Transaction)
 /**
   * Publish the provided tx as soon as possible depending on locktime and csv
   */
 final case class PublishAsap(tx: Transaction)
 final case class MakeFundingTx(localCommitPub: PublicKey, remoteCommitPub: PublicKey, amount: Satoshi)
-final case class MakeFundingTxResponse(fundingTx: Transaction, fundingTxOutputIndex: Int)
+final case class MakeFundingTxResponse(parentTx: Transaction, fundingTx: Transaction, fundingTxOutputIndex: Int)
 final case class GetTx(blockHeight: Int, txIndex: Int, outputIndex: Int, ctx: LightningMessage)
 final case class GetTxResponse(tx: Transaction, isSpendable: Boolean, ctx: LightningMessage)
 
