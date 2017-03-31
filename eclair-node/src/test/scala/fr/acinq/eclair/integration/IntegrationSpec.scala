@@ -123,8 +123,10 @@ class IntegrationSpec extends TestKit(ActorSystem("test")) with FunSuiteLike wit
   }
 
   def connect(node1: Setup, node2: Setup, fundingSatoshis: Long, pushMsat: Long) = {
-    val eventListener = TestProbe()
-    node1.system.eventStream.subscribe(eventListener.ref, classOf[ChannelStateChanged])
+    val eventListener1 = TestProbe()
+    val eventListener2 = TestProbe()
+    node1.system.eventStream.subscribe(eventListener1.ref, classOf[ChannelStateChanged])
+    node2.system.eventStream.subscribe(eventListener2.ref, classOf[ChannelStateChanged])
     val sender = TestProbe()
     sender.send(node1.switchboard, NewConnection(
       remoteNodeId = node2.nodeParams.privateKey.publicKey,
@@ -132,13 +134,15 @@ class IntegrationSpec extends TestKit(ActorSystem("test")) with FunSuiteLike wit
       newChannel_opt = Some(NewChannel(Satoshi(fundingSatoshis), MilliSatoshi(pushMsat)))))
     sender.expectMsg("connected")
     // waiting for channel to publish funding tx
-    awaitCond(eventListener.expectMsgType[ChannelStateChanged](5 seconds).currentState == WAIT_FOR_FUNDING_CONFIRMED)
+    awaitCond(eventListener1.expectMsgType[ChannelStateChanged](5 seconds).currentState == WAIT_FOR_FUNDING_CONFIRMED)
+    awaitCond(eventListener2.expectMsgType[ChannelStateChanged](5 seconds).currentState == WAIT_FOR_FUNDING_CONFIRMED)
     // confirming funding tx
     sender.send(bitcoincli, BitcoinReq("generate", 3))
     sender.expectMsgType[JValue](10 seconds)
     // waiting for channel to reach normal
-    awaitCond(eventListener.expectMsgType[ChannelStateChanged](5 seconds).currentState == NORMAL)
-    node1.system.eventStream.unsubscribe(eventListener.ref)
+    awaitCond(eventListener1.expectMsgType[ChannelStateChanged](5 seconds).currentState == NORMAL)
+    node1.system.eventStream.unsubscribe(eventListener1.ref)
+    node2.system.eventStream.unsubscribe(eventListener2.ref)
   }
 
   test("connect A->B->C->D and B->E->C") {

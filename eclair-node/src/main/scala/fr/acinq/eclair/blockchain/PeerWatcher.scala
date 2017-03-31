@@ -76,18 +76,18 @@ class PeerWatcher(nodeParams: NodeParams, client: ExtendedBitcoinClient)(implici
       // first let's see if the parent tx was published or not
       client.getTxConfirmations(txid.toString()).collect {
         case Some(_) =>
-        // parent tx was published, we need to make sure this particular output has not been spent
-        client.isTransactionOuputSpendable(txid.toString(), outputIndex, true).collect {
-          case false =>
-            log.warning(s"tx $txid has already been spent!!!")
-            client.getTxBlockHash(txid.toString()).collect {
-              case Some(blockhash) =>
-                log.warning(s"getting all transactions since blockhash=$blockhash")
-                client.getTxsSinceBlockHash(blockhash).map {
-                  case txs => txs.foreach(tx => self ! NewTransaction(tx))
-                }
-            }
-        }
+          // parent tx was published, we need to make sure this particular output has not been spent
+          client.isTransactionOuputSpendable(txid.toString(), outputIndex, true).collect {
+            case false =>
+              log.warning(s"tx $txid has already been spent!!!")
+              client.getTxBlockHash(txid.toString()).collect {
+                case Some(blockhash) =>
+                  log.warning(s"getting all transactions since blockhash=$blockhash")
+                  client.getTxsSinceBlockHash(blockhash).map {
+                    case txs => txs.foreach(tx => self ! NewTransaction(tx))
+                  }
+              }
+          }
       }
       addWatch(w, watches, block2tx)
 
@@ -121,6 +121,14 @@ class PeerWatcher(nodeParams: NodeParams, client: ExtendedBitcoinClient)(implici
         context.become(watching(watches, block2tx1))
       } else publish(tx)
 
+    case PublishParentAndChild(parent, child) =>
+      client.publishTransaction(parent).flatMap(parentid => {
+        log.debug(s"parent tx published as $parentid")
+        client.publishTransaction(child)
+      }).onFailure {
+        case t: Throwable => log.error(s"cannot publish parent tx ${parent.txid} and child tx ${child.txid}: reason=${t.getMessage}")
+      }
+
     case WatchEventConfirmed(BITCOIN_PARENT_TX_CONFIRMED(tx), blockHeight, _) =>
       val blockCount = Globals.blockCount.get()
       val csvTimeout = Scripts.csvTimeout(tx)
@@ -130,8 +138,8 @@ class PeerWatcher(nodeParams: NodeParams, client: ExtendedBitcoinClient)(implici
       val block2tx1 = block2tx.updated(absTimeout, tx +: block2tx.getOrElse(absTimeout, Seq.empty[Transaction]))
       context.become(watching(watches, block2tx1))
 
-    case MakeFundingTx(ourCommitPub, theirCommitPub, amount) =>
-      client.makeFundingTx(ourCommitPub, theirCommitPub, amount).map(r => MakeFundingTxResponse(r._1, r._2)).pipeTo(sender)
+    case MakeFundingTx(ourCommitPub, theirCommitPub, amount, fee) =>
+      client.makeFundingTx(ourCommitPub, theirCommitPub, amount, fee).map(r => MakeFundingTxResponse(r._1, r._2, r._3)).pipeTo(sender)
 
     case GetTx(blockHeight, txIndex, outputIndex, ctx) =>
       (for {
